@@ -18,25 +18,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify source ZIP
+      - name: Check ZIP
         run: |
           if [ ! -f "jp-ambient-source.zip" ]; then
-            echo "::error::Fichier jp-ambient-source.zip introuvable à la racine du dépôt."
-            exit 1
-          fi
-
-      - name: Extract Android project
-        run: |
-          mkdir -p source
-          unzip -o jp-ambient-source.zip -d source
-
-          if [ ! -f source/settings.gradle.kts ]; then
-            echo "::error::settings.gradle.kts est introuvable dans le ZIP."
-            exit 1
-          fi
-
-          if [ ! -f source/app/build.gradle.kts ]; then
-            echo "::error::app/build.gradle.kts est introuvable dans le ZIP."
+            echo "::error::jp-ambient-source.zip introuvable à la racine du dépôt."
             exit 1
           fi
 
@@ -49,44 +34,73 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Accept Android SDK licenses
-        run: |
-          yes | sdkmanager --licenses || true
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses || true
 
       - name: Install Android SDK packages
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Extract and locate project
+        shell: bash
         run: |
-          sdkmanager \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
+          mkdir -p extracted
+          unzip -oq jp-ambient-source.zip -d extracted
+
+          SETTINGS=$(find extracted -type f \
+            \( -name settings.gradle.kts -o -name settings.gradle \) \
+            -print -quit)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::Aucun settings.gradle ou settings.gradle.kts trouvé dans le ZIP."
+            echo "Contenu du ZIP :"
+            find extracted -maxdepth 5 -type f | head -200
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
+
+          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] && \
+             [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
+            echo "::error::Le fichier Gradle du module app est introuvable."
+            echo "Dossier trouvé : $PROJECT_DIR"
+            find extracted -maxdepth 6 -type f | head -200
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Projet trouvé dans : $PROJECT_DIR"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: Build Android APK
-        working-directory: source
-        run: gradle assembleDebug --stacktrace
+      - name: Build APK
+        run: gradle -p "$PROJECT_DIR" assembleDebug --stacktrace
 
-      - name: Prepare APK
+      - name: Locate APK
+        shell: bash
         run: |
-          APK="source/app/build/outputs/apk/debug/app-debug.apk"
+          APK=$(find "$PROJECT_DIR" -type f \
+            -path "*/build/outputs/apk/debug/*.apk" \
+            -print -quit)
 
-          if [ ! -f "$APK" ]; then
-            echo "::error::APK introuvable après la compilation."
+          if [ -z "$APK" ]; then
+            echo "::error::Aucun APK généré."
             exit 1
           fi
 
           cp "$APK" JP-Ambient.apk
+          echo "APK généré : $APK"
 
-      - name: Upload APK as workflow artifact
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: JP-Ambient-APK
           path: JP-Ambient.apk
           if-no-files-found: error
 
-      - name: Publish APK to GitHub Release
+      - name: Publish APK Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -94,12 +108,11 @@ jobs:
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" JP-Ambient.apk \
-              --repo "$GITHUB_REPOSITORY" \
-              --clobber
+              --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$TAG" JP-Ambient.apk \
               --repo "$GITHUB_REPOSITORY" \
               --title "JP Ambient Latest" \
-              --notes "Version compilée automatiquement par GitHub Actions." \
+              --notes "Build automatique de JP Ambient." \
               --latest
           fi
